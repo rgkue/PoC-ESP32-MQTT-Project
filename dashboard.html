@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monitor de temperatura · ESP32</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#eef1ee; --ink:#1d2a2a; --muted:#5d6b6b; --line:#cfd8d4; --ok:#0f766e; --bad:#b3202a; --panel:#f8faf8; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:"Bricolage Grotesque",system-ui,sans-serif; }
+  main { max-width:880px; margin:0 auto; padding:24px 16px 48px; }
+  header { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
+  h1 { font-size:1.1rem; font-weight:600; margin:0; }
+  #estado { font-size:.9rem; color:var(--muted); display:flex; align-items:center; gap:8px; }
+  #estado i { width:10px; height:10px; border-radius:50%; background:#999; display:inline-block; }
+  #estado.on i { background:var(--ok); }
+  #banner { display:none; margin:20px 0 0; padding:14px 16px; background:var(--bad); color:#fff; font-weight:600; border-radius:6px; }
+  #banner.show { display:block; }
+  .lectura { display:flex; align-items:flex-end; gap:32px; flex-wrap:wrap; margin:28px 0 8px; }
+  #temp { font-size:clamp(4.5rem,18vw,8rem); font-weight:800; line-height:.9; letter-spacing:-.03em; }
+  #temp.alta { color:var(--bad); }
+  #temp small { font-size:.35em; font-weight:400; color:var(--muted); letter-spacing:0; }
+  #hum { font-size:1.6rem; font-weight:600; padding-bottom:6px; }
+  #hum span { display:block; font-size:.85rem; font-weight:400; color:var(--muted); }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:16px; margin-top:20px; }
+  h2 { font-size:.95rem; font-weight:600; margin:0 0 10px; }
+  canvas { width:100%; height:220px; display:block; }
+  ul { list-style:none; margin:0; padding:0; font-size:.95rem; }
+  li { padding:8px 0; border-top:1px solid var(--line); display:flex; justify-content:space-between; gap:12px; }
+  li:first-child { border-top:0; }
+  .vacio { color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Temperatura del ESP32 (Wokwi)</h1>
+    <div id="estado"><i></i><span>Conectando al broker…</span></div>
+  </header>
+
+  <div id="banner" role="alert"></div>
+
+  <div class="lectura">
+    <div id="temp">--<small> °C</small></div>
+    <div id="hum">--<span>humedad relativa (%)</span></div>
+  </div>
+
+  <section>
+    <h2>Últimas mediciones (línea punteada: umbral de alerta)</h2>
+    <canvas id="grafica"></canvas>
+  </section>
+
+  <section>
+    <h2>Historial de alertas</h2>
+    <ul id="alertas"><li class="vacio">Sin alertas todavía. Sube el DHT22 en Wokwi a más de 35 °C.</li></ul>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script>
+  const BROKER = "wss://broker.mqttdashboard.com:8884/mqtt";
+  const TOPIC_CLIMA = "isaac/clima";
+  const TOPIC_ALERTAS = "isaac/alertas";
+  const UMBRAL_ALTO = 35, UMBRAL_REARME = 33, MAX_PUNTOS = 60;
+
+  const $ = id => document.getElementById(id);
+  const datos = [];
+
+  const client = mqtt.connect(BROKER, { clientId: "dash-" + Math.random().toString(16).slice(2, 10) });
+
+  client.on("connect", () => {
+    $("estado").classList.add("on");
+    $("estado").lastElementChild.textContent = "Conectado";
+    client.subscribe([TOPIC_CLIMA, TOPIC_ALERTAS]);
+  });
+  client.on("close", () => {
+    $("estado").classList.remove("on");
+    $("estado").lastElementChild.textContent = "Sin conexión, reintentando…";
+  });
+
+  client.on("message", (topic, payload) => {
+    let d;
+    try { d = JSON.parse(payload.toString()); } catch (e) { return; }
+    if (topic === TOPIC_CLIMA) mostrarClima(d);
+    else if (topic === TOPIC_ALERTAS) mostrarAlerta(d);
+  });
+
+  function mostrarClima(d) {
+    $("temp").innerHTML = d.temp.toFixed(1) + "<small> °C</small>";
+    $("temp").classList.toggle("alta", d.temp > UMBRAL_ALTO);
+    $("hum").firstChild.nodeValue = d.humidity.toFixed(1) + " %";
+    if (d.temp < UMBRAL_REARME) $("banner").classList.remove("show");
+    datos.push(d.temp);
+    if (datos.length > MAX_PUNTOS) datos.shift();
+    dibujar();
+  }
+
+  function mostrarAlerta(d) {
+    const hora = new Date().toLocaleTimeString("es-PA");
+    $("banner").textContent = "Alerta: " + d.temp.toFixed(1) + " °C supera el umbral de " + d.umbral + " °C";
+    $("banner").classList.add("show");
+    const lista = $("alertas");
+    if (lista.firstElementChild && lista.firstElementChild.classList.contains("vacio")) lista.innerHTML = "";
+    const li = document.createElement("li");
+    li.innerHTML = "<span>" + hora + "</span><span>" + d.temp.toFixed(1) + " °C · humedad " + d.humidity.toFixed(1) + " %</span>";
+    lista.prepend(li);
+  }
+
+  function dibujar() {
+    const c = $("grafica"), r = window.devicePixelRatio || 1;
+    c.width = c.clientWidth * r; c.height = c.clientHeight * r;
+    const g = c.getContext("2d"); g.scale(r, r);
+    const w = c.clientWidth, h = c.clientHeight, pad = 28;
+    const min = Math.min(0, ...datos), max = Math.max(UMBRAL_ALTO + 5, ...datos);
+    const y = v => h - pad - (v - min) / (max - min) * (h - pad * 2);
+    g.clearRect(0, 0, w, h);
+    g.font = "12px sans-serif"; g.fillStyle = "#5d6b6b";
+    g.strokeStyle = "#b3202a"; g.setLineDash([5, 4]);
+    g.beginPath(); g.moveTo(pad, y(UMBRAL_ALTO)); g.lineTo(w, y(UMBRAL_ALTO)); g.stroke();
+    g.fillText(UMBRAL_ALTO + " °C", 0, y(UMBRAL_ALTO) + 4);
+    g.setLineDash([]); g.strokeStyle = "#0f766e"; g.lineWidth = 2; g.beginPath();
+    datos.forEach((v, i) => {
+      const x = pad + i * (w - pad) / (MAX_PUNTOS - 1);
+      i ? g.lineTo(x, y(v)) : g.moveTo(x, y(v));
+    });
+    g.stroke();
+  }
+  window.addEventListener("resize", dibujar);
+</script>
+</body>
+</html>
